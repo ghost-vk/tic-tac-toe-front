@@ -1,22 +1,42 @@
 <script setup>
 import { onMounted, ref } from 'vue';
 import Board from './components/Board.vue';
+import Button from './components/Button.vue';
 import axios from 'axios';
 
 const BASE_URL = 'http://localhost:8080';
-
 const currentPlayer = ref(null);
 const receivedInvite = ref(null);
 const players = ref([]);
 const gameState = ref({});
+const ws = ref(null);
 
-const ws = new WebSocket('ws://localhost:8081');
+const connect = () => {
+  if (ws.value instanceof WebSocket) {
+    console.info('Already connected');
+    return;
+  }
+  ws.value = new WebSocket('ws://localhost:8081');
+  ws.value.onmessage = (e) => onWebSocketMessage(e);
+}
+
+const disconnect = () => {
+  if (!(ws.value instanceof WebSocket)) {
+    console.info('Connection is not established');
+    return;
+  }
+  ws.value.close();
+  currentPlayer.value = null;
+  gameState.value = null;
+  ws.value = null;
+}
 
 /**
  * Long pooling for fetch players
  */
 const fetchPlayers = () => {
   setInterval(async () => {
+    if (!currentPlayer.value) return;
     const { data } = await axios.get(`${BASE_URL}/players`);
     if (Array.isArray(data.players)) {
       players.value = data.players.filter((p) => p.id !== currentPlayer.value.id);
@@ -39,7 +59,7 @@ const confirmInvite = () => {
     action: 'AcceptInvite',
     payload: { inviteId: receivedInvite.value.inviteId }
   }
-  ws.send(JSON.stringify(request));
+  ws.value.send(JSON.stringify(request));
   receivedInvite.value = null;
 }
 
@@ -52,7 +72,7 @@ const createGame = (boardSize) => {
       boardSize,
     }
   };
-  ws.send(JSON.stringify(request));
+  ws.value.send(JSON.stringify(request));
 }
 
 const onCellClick = (coord) => {
@@ -66,10 +86,10 @@ const onCellClick = (coord) => {
       actor: { id: currentPlayer.value.id },
     }
   }
-  ws.send(JSON.stringify(request));
+  ws.value.send(JSON.stringify(request));
 }
 
-ws.onmessage = (e) => {
+const onWebSocketMessage = (e) => {
   console.log(e.data);
   const data = JSON.parse(e.data);
 
@@ -78,12 +98,12 @@ ws.onmessage = (e) => {
       currentPlayer.value = data.payload.player;
       break;
     }
-    case 'InviteReceived': {
-      receivedInvite.value = data.payload;
-      break;
-    }
     case 'InviteAccepted': {
       gameState.value = { gameSession: { id: data.payload.gameSessionId } }
+      break;
+    }
+    case 'InviteReceived': {
+      receivedInvite.value = data.payload;
       break;
     }
     case 'GameCreated': {
@@ -98,8 +118,29 @@ ws.onmessage = (e) => {
       gameState.value = data.payload;
       break;
     }
+    case 'OpponentLeftTheGameSession': {
+      alert('Ops! Your opponent has left the game.');
+      gameState.value = null;
+      break;
+    }
+    case 'FailCreateGame': {
+      alert(data.payload.error);
+      break;
+    }
+    case 'After3SerialWins': {
+      alert(data.payload.message);
+      gameState.value = null;
+      ws.value = null;
+      break;
+    }
+    case 'After10TotalWins': {
+      alert(data.payload.message);
+      gameState.value = null;
+      ws.value = null;
+      break;
+    }
   }
-};
+}
 
 onMounted(() => fetchPlayers());
 </script>
@@ -112,57 +153,97 @@ onMounted(() => fetchPlayers());
       </div>
 
       <div>
-        <div class="flex flex-nowrap h-[calc(100vh-12rem)]">
-          <div class="w-full h-full">
-            <div v-if="gameState.game && gameState.game.board">
+        <div class="flex flex-nowrap">
+          <div class="w-full">
+            <div v-if="gameState && gameState.game && gameState.game.board">
               <Board :rows="gameState.game.board" @cellClick="onCellClick" />
             </div>
           </div>
 
           <div class="w-80 h-full bg-green-100 p-3 rounded-xl shadow">
-            <div v-if="gameState.gameSession?.id" class="mb-2">
+            <div class="flex justify-center mb-4">
+              <Button
+                v-if="ws === null"
+                @click="connect"
+                text="Connect"
+              />
+              <Button
+                v-else
+                @click="disconnect"
+                text="Disconnect"
+              />
+            </div>
+
+            <div
+              v-if="gameState && gameState.gameSession && gameState.gameSession.firstPlayer"
+              class="mb-2"
+            >
+              <div class="w-full h-px bg-green-300 mb-2"></div>
+              <h3 class="text-xl text-center mb-2">Results</h3>
+              <h4
+                class="text-lg text-center mb-1"
+                :class="currentPlayer.id !== gameState.gameSession.firstPlayer.id ? 'text-red-600' : 'text-green-500'"
+              >"X" - {{ gameState.gameSession.firstPlayer.winCount }}</h4>
+              <h4
+                class="text-lg text-center"
+                :class="currentPlayer.id !== gameState.gameSession.secondPlayer.id ? 'text-red-600' : 'text-green-500'"
+              >"O" - {{ gameState.gameSession.secondPlayer.winCount }}</h4>
+            </div>
+
+            <div v-if="gameState && gameState.gameSession?.id" class="mb-2">
+              <div class="w-full h-px bg-green-300 mb-2"></div>
               <h3 class="text-xl text-center mb-2">Create Game</h3>
               <div class="flex justify-center gap-1">
                 <div>
-                  <button class="p-2 bg-white shadow rounded" @click="createGame(3)">3x3</button>
+                  <Button
+                    @click="createGame(3)"
+                    text="3x3"
+                  />
                 </div>
                 <div>
-                  <button class="p-2 bg-white shadow rounded" @click="createGame(4)">4x4</button>
+                  <Button
+                    @click="createGame(4)"
+                    text="4x4"
+                  />
                 </div>
                 <div>
-                  <button class="p-2 bg-white shadow rounded" @click="createGame(5)">5x5</button>
+                  <Button
+                    @click="createGame(5)"
+                    text="5x5"
+                  />
                 </div>
               </div>
             </div>
 
-            <div v-if="receivedInvite" class="mb-2">
+            <div v-if="receivedInvite" class="mb-3">
+              <div class="w-full h-px bg-green-300 mb-2"></div>
               <h3 class="text-lg text-center mb-2">You received an invitation</h3>
-              <div>
-                <button class="p-2 bg-white shadow rounded" @click="confirmInvite">Confirm</button>
+              <div class="flex justify-center">
+                <Button
+                  @click="confirmInvite"
+                  text="Confirm"
+                />
               </div>
             </div>
 
-            <div v-if="!gameState.gameSession?.id">
+            <div
+              v-if="!receivedInvite && ws"
+              class="mb-2"
+            >
+              <div class="w-full h-px bg-green-300 mb-2"></div>
               <h3 class="text-lg text-center">Create invite</h3>
               <div>
                 <ul>
-                  <li v-for="p in players" :key="p.id" v-on:click="invitePlayer(p.id)" class="hover:text-blue-700 cursor-pointer">
+                  <li
+                    v-for="p in players"
+                    :key="p.id"
+                    v-on:click="invitePlayer(p.id)"
+                    class="hover:text-blue-700 cursor-pointer"
+                  >
                     {{ p.id }}
                   </li>
                 </ul>
               </div>
-            </div>
-
-            <div v-if="gameState.gameSession && gameState.gameSession.firstPlayer">
-              <h3 class="text-xl text-center mb-2">Results</h3>
-              <h4
-                class="text-lg text-center mb-1"
-                :class="currentPlayer.id === gameState.gameSession.firstPlayer.id ? 'text-red-600' : 'text-green-500'"
-              >"X" - {{ gameState.gameSession.firstPlayer.winCount }}</h4>
-              <h4
-                class="text-lg text-center"
-                :class="currentPlayer.id === gameState.gameSession.secondPlayer.id ? 'text-red-600' : 'text-green-500'"
-              >"O" - {{ gameState.gameSession.secondPlayer.winCount }}</h4>
             </div>
           </div>
         </div>
